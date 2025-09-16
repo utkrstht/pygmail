@@ -2,8 +2,8 @@
 Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
   
-### how to use
-**first run**  
+## how to use
+### first run
 you first install using `pip install pygmail`,  
 then you run `pygmail --authenticate`, you choose the email from which you wish to send emails.  
 pygmail will ask to be able to send emails on your behalf.  
@@ -13,7 +13,7 @@ pygmail will ask to be able to send emails on your behalf.
 once that's complete, a private token will be printed in your terminal and also a session.token file  
 will be created in the current working directory containing your token  
 
-**sending emails**  
+### sending emails
 first import GmailClient from pygmail.
 ```py
 from pygmail import GmailClient
