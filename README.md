@@ -1,6 +1,10 @@
 # pygmail
 Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
+
+> ![IMPORTANT]
+> pygmail has not yet been published on pypi.
+> it is currently under testing.
   
 ### how to use
 **first run**  
