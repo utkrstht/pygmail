@@ -1,63 +1,24 @@
 # pygmail
 Python Gmail client to send emails fast and easy  
-Installation through `pip install pygmail`  
-
-> [!IMPORTANT]
-> pygmail has not yet been published on pypi.
-> it is currently under testing.
+Installation through `pip install *********` (Currently not on the PyPi index.)  
   
 ### how to use
 **first run**  
 you first install using `pip install pygmail`,  
-then you run `pygmail --authenticate`, you choose the email from which you wish to send emails.  
+then you run `pygmail authenticate`, you choose the email from which you wish to send emails.  
 pygmail will ask to be able to send emails on your behalf.  
 
-![pygmail --authenticate](extras/auth.png)
-
-once that's complete, a private token will be printed in your terminal and also a session.token file  
-will be created in the current working directory containing your token  
+once that's complete, a private token will be created in your home dir inside `.pygmail/`  
+the exact directory will be printed as well.  
 
 **sending emails**  
-first import GmailClient from pygmail.
-```py
-from pygmail import GmailClient
-```
-then, create an instance of GmailClient.
-```py
-client = GmailClient()
-```
-then, initialize it, either pass the session token directly, or have the session.token file in the same directory as the python file.
-```py
-client.init("SESSION_TOKEN")
+You can see examples for sending emails in `examples/` in [here](https://github.com/utkrstht/pygmail).  
+pygmail can send one singular attachment, cc and bcc (per email message) and html bodies.  
+this is totally a feature and not at all an issue in my code!!!!
 
-or
-
-client.init()
-```
-now finally, send the email.
-```py
-client.send_email("recipient@gmail.com", "Subject", "Body")
-```
-here's it all in action:
-```py
-from pygmail import GmailClient
-
-client = GmailClient()
-client.init("eyJhbGciOiJAfnduiIsInR5cCI6IkpXVCJ9.eyYFNaHOiJTRzRNdFUyZmoyTFI0aWlMRm16QjRBIiwiZXhwIjoxNzU4MTEwMTk5fQ.epxB85tX99gfUYx_Ji9uHtLWTFnyumfKEFyYnw0kyE")
-
-client.send_email("recipient@gmail.com", "Subject", "Body")
-```
-
-you can get the message id of the email as `send_email` returns the message:
-```py
-resp = client.send_email("something", "cool subject", "even cooler message")
-print(resp)
-```
-output:
-```
-{'message_id': '19952cb0365d9fd8'}
-```
+**reading emails**
+currently pygmail has no such feature, it will come soon in the future  
 
 ### common errors
-`requests.exceptions.ConnectionError: HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url` --- The backend server is down, wait a few minutes or so.  
-`500 Server Error` --- Server is under maintence, and the server ran into an error trying to process your request.
+`[WinError 10061] No connection could be made because the target machine actively refused it` --- The backend server is down, wait a few minutes or so.  
+`500 Server Error` --- Server is under maintence, and so the server ran into an error trying to process your request.
