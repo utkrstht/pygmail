@@ -2,10 +2,28 @@
 Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
 
+> ![IMPORTANT]
+> Do note that pygmail is not currently on PyPi
+
 (being made for midnight.hackclub.com)  
 The backend server is being hosted on [Nest](https://hackclub.app)
   
 ### how to use
+#### manual installation
+First, clone the repository:
+```
+git clone https://github.com/utkrstht/pygmail.git
+```
+Then, cd into the repository:
+```
+cd pygmail/pygmail
+```
+Now finally, run 
+```
+pip install .
+```
+and Done!
+
 #### **first run**  
 you first install using `pip install pygmail`,  
 Authenticate using `pygmail authenticate`, to be more secure, you should restrict the generated session token to only the IPs you'll be using, this way you can prevent unauthorized use:  
