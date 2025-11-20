@@ -11,13 +11,15 @@ client.init()
 
 # Now send the email
 resp = client.send_email(
-    to="krishkracks@gmail.com",
+    to="someone@gmail.com",
     subject="Monkey Selfie",
-    cc=["sampannthestar@gmail.com", "meghna.tndpa@gmail.com"],
+    cc=["somebodyelse@gmail.com", "absolutelyhugecat@gmail.com"],
+    bcc="secretperson@gmail.com",
     body="See monkey selfie",
     # If you declare html and also declare body, the body will be ignored.
     html="<h1>Selfie</h1><p>See Monkey's attached selfie</p>",
     # attachments field must always be an array
+    attachments=["selfie.png"]
 )
 
 # Print the message id
