@@ -10,8 +10,10 @@ client = GmailClient()
 client.init()
 
 # List recent emails
-# list_emails returns a dictionary, containing:
-# Email Headers (from, to, subject, etc), Plain Body, HTML Body and Attachments
+# emails['messages'] returns a dictionary, containing:
+# headers (from, to, subject, etc), body_plain, body_html and attachments
+# list_emails returns, messages, next_page_token and result_size_estimate (how many emails)
+# Inorder to get next page results, you need to pass next_page_token to list_emails' page_token
 emails = client.list_emails(max_results=30)
 
 # Print how many emails found
@@ -32,6 +34,8 @@ if emails['messages']:
     print(f"\nBody:\n{email['body_plain']}")
 
     # Check if the email has attachments
+    # emails['attachments'] has these subdictionaries:
+    # filename, mime_type, attachment_id and size (in bytes)
     if email['attachments']:
         print(f"\nAttachments: {len(email['attachments'])}")
         for att in email['attachments']:

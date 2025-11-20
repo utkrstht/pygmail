@@ -36,6 +36,24 @@ client.authenticate()
 client.is_authorized()
 ```
 
+You can also fetch your own authorized account's details:
+```py
+client.me()
+```
+Response Structure:
+```
+response
+│
+└── user (Dictionary)
+     ├── id (String)
+     ├── email (String)
+     ├── verified_email (Boolean)
+     ├── name (String)
+     ├── given_name (String)
+     ├── family_name (String)
+     └── picture (String - URL)
+```
+
 #### **sending emails**
 You can send emails using pygmail, you have two options, Python or CLI.  
 Python:
@@ -68,10 +86,10 @@ resp = client.send_email(
 print(resp)
 ```
 
-This is not recommended, but you can also use CLI to send emails,  
-You can repeat --to, --cc, --bcc and --attach flags as needed,  
-Not all flags are required (only --to and --subject are required),  
-If you declare --html and --body, then body will be ignored  
+You can use CLI to send emails, but this is not recommended,  
+You can repeat `--to`, `--cc`, `--bcc` and `--attach` flags as needed,  
+Not all flags are required (only `--to` and `--subject` are required),  
+If you declare `--html` and `--body`, then body will be ignored  
 ```bash
 pygmail send \
 --to <email> \
@@ -84,8 +102,82 @@ pygmail send \
 ```
 
 #### **reading emails**
-You can read/search emails using pygmail, 
+You can read/search emails using pygmail,  
+```py
+emails = client.list_emails()
+```
+Response Structure:
+```
+response
+│
+├── messages[]
+│     ├── id (string)
+│     └── threadId (string)
+│
+├── next_page_token (string)
+└── result_size_estimate (integer (how many email messages found for the query))
+```
 
+You need to parse an email if you wish to fetch it's data.  
+After parsing a specific email using:
+```py 
+message_id = emails['messages'][0]['id']
+email = client.get_parsed_email(message_id)
+```
+
+You get this response structure:
+```
+emails
+│
+├── headers (Dictionary)
+│     ├── From (String)
+│     ├── To (String)
+│     ├── Subject (String)
+│     └── Date (String)
+│
+├── body_plain (String)
+├── body_html (String)
+└── attachments[] (List[Dictionary])
+      ├── filename (string)
+      ├── mime_type (string)
+      ├── attachment_id (string)
+      └── size (integer)
+
+```
+
+To fetch any value, (e.g. size of an attachment), you can follow this:
+```py
+attachment_size = email['attachments'][0]['size'] # 0 is the attachment index
+```
+Simply follow the tree.
+
+If you wish to access previous pages, you'll need to pass `next_page_token` to `list_emails`'s `page_token` in another request:  
+```py
+next_page = client.list_emails(page_token=next_page_token)
+```
+
+You can also, query/search for specific things:
+```py
+# Search for something
+emails = client.list_emails(query="I am searching")
+
+# Search for emails from a specific sender
+emails = client.list_emails(query="from:someone@gmail.com")
+
+# Search for unread emails
+emails = client.list_emails(query="is:unread")
+```
+You can query anything that you can in normal gmail.
+ 
+
+To set how many results/emails you can get at a time, you can set `max_results`  
+You can't set it over 100 though, as gmail can only supply 100 at a time  
+If you don't set it, it'll default to 10:  
+```py
+emails = client.list_emails(max_results=50)
+```
+
+You currently cannot download attachments, but this is being worked on.
 
 #### **examples**
 Find examples in `examples/`

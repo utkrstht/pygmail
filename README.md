@@ -8,10 +8,10 @@ The backend server is being hosted on [Nest](https://hackclub.app)
 ### how to use
 #### **first run**  
 you first install using `pip install pygmail`,  
-then you run `pygmail authenticate`, you choose the email from which you wish to use pygmail from.
-
-once that's complete, a private token will be created in your home dir inside `.pygmail/`  
-the exact directory will be printed as well.  
+Authenticate using `pygmail authenticate`, to be more secure, you should restrict the generated session token to only the IPs you'll be using, this way you can prevent unauthorized use:  
+`pygmail authenticate --restrict <IP>`  
+or, if using multiple IPs  
+`pygmail authenticate --restrict "<IP>, <IP2>, <IP3>"`
 
 #### **examples**
 Find examples in `examples/`
