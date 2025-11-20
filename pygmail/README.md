@@ -1,7 +1,9 @@
 # pygmail
-Python Gmail client to send emails fast and easy using Google OAuth2
+Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
   
+(being made for midnight.hackclub.com)
+
 ### how to use
 #### **first run**  
 you first install using `pip install pygmail`,  
@@ -13,9 +15,9 @@ the exact directory will be printed as well.
 
 #### **examples**
 Find examples in `examples/`
-- `authenticate.py` --- Authenticate using python instead of CLI with client.authenticate()
-- `me.py` --- Check which account is authenticated with client.me()
-- `send_email.py` --- Send emails with client.send_email()
+- `authenticate.py` --- Authenticate using python instead of CLI with client.authenticate()  
+- `me.py` --- Check which account is authenticated with client.me()  
+- `send_email.py` --- Send emails with client.send_email()  
 
 #### **sending emails**  
 You can see examples for sending emails in `examples/` in [here](https://github.com/utkrstht/pygmail).
@@ -24,5 +26,6 @@ You can see examples for sending emails in `examples/` in [here](https://github.
 currently pygmail has no such feature, it will come soon in the future  
 
 ### common errors
+`401 Client Error: Unauthorized for url: http://127.0.0.1:8000/send_email`--- You're not authenticated, See above on how to.  
 `[WinError 10061] No connection could be made because the target machine actively refused it` --- The backend server is down, wait a few minutes or so.  
 `500 Server Error` --- Server is under maintence, and so the server ran into an error trying to process your request.

@@ -13,7 +13,7 @@ CALLBACK_PATHS = ("/", "/oauth2callback")
 
 
 class GmailClient:
-    def __init__(self, backend_url: str = "http://127.0.0.1:8000", session_file: Union[str, Path] = None, rpm: int = 60):
+    def __init__(self, backend_url: str = "http://37.27.51.34:31873", session_file: Union[str, Path] = None, rpm: int = 60):
         self.backend_url = backend_url.rstrip("/")
         self.session_file = Path(session_file) if session_file else Path.home() / ".pygmail" / "session.token"
         self.session_token: Optional[str] = None
@@ -218,12 +218,58 @@ class GmailClient:
         finally:
             for f in file_objs:
                 f.close()            
-                
+
     def authenticate_cli(self, open_browser: bool = True):
         token = self.authenticate(open_browser=open_browser)
         print("Authentication successful. Session token saved to:", str(self.session_file))
         return token
 
+    def list_emails(self, max_results: int = 10, query: Optional[str] = None, page_token: Optional[str] = None) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        params = {"max_results": max_results}
+        if query:
+            params["query"] = query
+        if page_token:
+            params["page_token"] = page_token
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/list_emails",
+            params=params,
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_email(self, message_id: str, format: str = "full") -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/get_email/{message_id}",
+            params={"format": format},
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_parsed_email(self, message_id: str) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/get_parsed_email/{message_id}",
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 def main():
     parser = argparse.ArgumentParser(prog="pygmail", description="pygmail CLI")

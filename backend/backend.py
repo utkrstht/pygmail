@@ -35,6 +35,7 @@ CLIENT_SECRETS_FILE = os.environ.get("CLIENT_SECRETS_FILE", "credentials.json")
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
@@ -74,6 +75,12 @@ class EmailRequest(BaseModel):
 class ExchangeRequest(BaseModel):
     code: str
     state: Optional[str] = None
+
+class ListEmailsParams(BaseModel):
+    max_results: Optional[int] = 10
+    query: Optional[str] = None  # Gmail search query
+    page_token: Optional[str] = None
+
 
 
 def encrypt_token(token_json: dict) -> bytes:
@@ -177,6 +184,65 @@ def make_msg(req: EmailRequest) -> str:
 
     return base64.urlsafe_b64encode(root.as_bytes()).decode()
 
+def parse_email_body(message: dict) -> dict:
+    result = {
+        "id": message.get("id"),
+        "thread_id": message.get("threadId"),
+        "snippet": message.get("snippet"),
+        "headers": {},
+        "body_plain": "",
+        "body_html": "",
+        "attachments": []
+    }
+    
+    # Parse headers
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        name = header.get("name")
+        if name in ["From", "To", "Subject", "Date", "Cc", "Bcc"]:
+            result["headers"][name] = header.get("value")
+    
+    # Parse body
+    def parse_parts(parts):
+        for part in parts:
+            mime_type = part.get("mimeType")
+            body = part.get("body", {})
+            
+            if mime_type == "text/plain":
+                data = body.get("data")
+                if data:
+                    result["body_plain"] += base64.urlsafe_b64decode(data).decode("utf-8")
+            elif mime_type == "text/html":
+                data = body.get("data")
+                if data:
+                    result["body_html"] += base64.urlsafe_b64decode(data).decode("utf-8")
+            elif "multipart" in mime_type:
+                sub_parts = part.get("parts", [])
+                parse_parts(sub_parts)
+            elif body.get("attachmentId"):
+                result["attachments"].append({
+                    "filename": part.get("filename"),
+                    "mime_type": mime_type,
+                    "attachment_id": body.get("attachmentId"),
+                    "size": body.get("size")
+                })
+    
+    payload = message.get("payload", {})
+    if "parts" in payload:
+        parse_parts(payload["parts"])
+    else:
+        # Single part message
+        body = payload.get("body", {})
+        data = body.get("data")
+        if data:
+            mime_type = payload.get("mimeType")
+            decoded = base64.urlsafe_b64decode(data).decode("utf-8")
+            if mime_type == "text/html":
+                result["body_html"] = decoded
+            else:
+                result["body_plain"] = decoded
+    
+    return result
 
 OAUTH_STATE = {}
 
@@ -314,3 +380,97 @@ def me(request: Request):
     oauth2 = build("oauth2", "v2", credentials=creds)
     user_info = oauth2.userinfo().get().execute()
     return {"user": user_info}
+
+@app.get("/list_emails")
+def list_emails(
+    request: Request,
+    max_results: int = 10,
+    query: Optional[str] = None,
+    page_token: Optional[str] = None
+):
+    # --- auth ---
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "Missing session token")
+    session_token = auth_header.split(" ")[1]
+    user_id = verify_jwt(session_token)
+
+    # --- credentials ---
+    token_json = load_token(user_id)
+    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
+    
+    service = build("gmail", "v1", credentials=creds)
+    
+    # List messages
+    params = {"userId": "me", "maxResults": max_results}
+    if query:
+        params["q"] = query
+    if page_token:
+        params["pageToken"] = page_token
+    
+    results = service.users().messages().list(**params).execute()
+    messages = results.get("messages", [])
+    
+    return {
+        "messages": messages,
+        "next_page_token": results.get("nextPageToken"),
+        "result_size_estimate": results.get("resultSizeEstimate")
+    }
+
+@app.get("/get_email/{message_id}")
+def get_email(request: Request, message_id: str, format: str = "full"):
+    # --- auth ---
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "Missing session token")
+    session_token = auth_header.split(" ")[1]
+    user_id = verify_jwt(session_token)
+
+    # --- credentials ---
+    token_json = load_token(user_id)
+    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
+    
+    service = build("gmail", "v1", credentials=creds)
+    
+    # Get message
+    message = service.users().messages().get(
+        userId="me", 
+        id=message_id,
+        format=format
+    ).execute()
+    
+    return message
+
+
+@app.get("/get_parsed_email/{message_id}")
+def get_parsed_email(request: Request, message_id: str):
+    # --- auth ---
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "Missing session token")
+    session_token = auth_header.split(" ")[1]
+    user_id = verify_jwt(session_token)
+
+    # --- credentials ---
+    token_json = load_token(user_id)
+    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
+    
+    service = build("gmail", "v1", credentials=creds)
+    
+    # Get message
+    message = service.users().messages().get(
+        userId="me", 
+        id=message_id,
+        format="full"
+    ).execute()
+    
+    return parse_email_body(message)
