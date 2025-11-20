@@ -2,7 +2,7 @@
 Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
   
-(being made for midnight.hackclub.com)
+(being made for midnight.hackclub.com)  
 The backend server is being hosted on [Nest](https://hackclub.app)
 
 ### how to use
