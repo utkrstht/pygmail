@@ -75,6 +75,7 @@ class EmailRequest(BaseModel):
 class ExchangeRequest(BaseModel):
     code: str
     state: Optional[str] = None
+    allowed_ips: Optional[List[str]] = None
 
 class ListEmailsParams(BaseModel):
     max_results: Optional[int] = 10
@@ -105,18 +106,43 @@ def load_token(user_id: str) -> dict:
         return decrypt_token(f.read())
 
 
-def make_jwt(user_id: str, expires_minutes: int = 60 * 24) -> str:
-    exp_ts = int((datetime.datetime.utcnow() + datetime.timedelta(minutes=expires_minutes)).timestamp())
+def make_jwt(user_id: str, allowed_ips: Optional[List[str]] = None, expires_days: int = 365) -> str:
+    exp_ts = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp())
     payload = {"sub": user_id, "exp": exp_ts}
+    if allowed_ips:
+        payload["allowed_ips"] = allowed_ips
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def verify_jwt(token: str) -> str:
+def verify_jwt(token: str, client_ip: Optional[str] = None) -> tuple[str, Optional[List[str]]]:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload["sub"]
+        user_id = payload["sub"]
+        allowed_ips = payload.get("allowed_ips")
+        
+        # Check IP restriction if present
+        if allowed_ips and client_ip:
+            if client_ip not in allowed_ips:
+                raise HTTPException(403, f"Access denied: IP {client_ip} not in allowed list")
+        
+        return user_id, allowed_ips
     except JWTError:
         raise HTTPException(401, "Invalid session token")
+
+
+def get_client_ip(request: Request) -> str:
+    # Check X-Forwarded-For first (for proxies)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    
+    # Check X-Real-IP
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    
+    # Fall back to direct connection
+    return request.client.host if request.client else "unknown"
 
 
 MAX_EMAILS = 10
@@ -272,7 +298,7 @@ def exchange_code(req: ExchangeRequest):
     token_json = json.loads(creds.to_json())
     user_id = secrets.token_urlsafe(16)
     save_token(user_id, token_json)
-    session_token = make_jwt(user_id)
+    session_token = make_jwt(user_id, allowed_ips=req.allowed_ips)
     return JSONResponse(content={"session_token": session_token})
 
 @app.exception_handler(RequestValidationError)
@@ -306,7 +332,8 @@ async def send_email(
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+    client_ip = get_client_ip(request)
+    user_id, _ = verify_jwt(session_token, client_ip)
 
     # --- rate limit ---
     check_rate(user_id)
@@ -315,11 +342,13 @@ async def send_email(
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+        try:
+            creds.refresh(GoogleRequest())
+            save_token(user_id, json.loads(creds.to_json()))
+        except Exception as e:
+            raise HTTPException(401, f"Token refresh failed: {str(e)}")
     service = build("gmail", "v1", credentials=creds)
 
-    # --- hi how's your day going ---
     to_list = to
     cc_list = cc
     bcc_list = bcc
@@ -369,13 +398,17 @@ def me(request: Request):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ", 1)[1]
-    user_id = verify_jwt(session_token)
+    client_ip = get_client_ip(request)
+    user_id, _ = verify_jwt(session_token, client_ip)
 
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+        try:
+            creds.refresh(GoogleRequest())
+            save_token(user_id, json.loads(creds.to_json()))
+        except Exception as e:
+            raise HTTPException(401, f"Token refresh failed: {str(e)}")
 
     oauth2 = build("oauth2", "v2", credentials=creds)
     user_info = oauth2.userinfo().get().execute()
@@ -393,14 +426,18 @@ def list_emails(
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+    client_ip = get_client_ip(request)
+    user_id, _ = verify_jwt(session_token, client_ip)
 
     # --- credentials ---
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+        try:
+            creds.refresh(GoogleRequest())
+            save_token(user_id, json.loads(creds.to_json()))
+        except Exception as e:
+            raise HTTPException(401, f"Token refresh failed: {str(e)}")
     
     service = build("gmail", "v1", credentials=creds)
     
@@ -427,14 +464,18 @@ def get_email(request: Request, message_id: str, format: str = "full"):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+    client_ip = get_client_ip(request)
+    user_id, _ = verify_jwt(session_token, client_ip)
 
     # --- credentials ---
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+        try:
+            creds.refresh(GoogleRequest())
+            save_token(user_id, json.loads(creds.to_json()))
+        except Exception as e:
+            raise HTTPException(401, f"Token refresh failed: {str(e)}")
     
     service = build("gmail", "v1", credentials=creds)
     
@@ -455,14 +496,18 @@ def get_parsed_email(request: Request, message_id: str):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+    client_ip = get_client_ip(request)
+    user_id, _ = verify_jwt(session_token, client_ip)
 
     # --- credentials ---
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+        try:
+            creds.refresh(GoogleRequest())
+            save_token(user_id, json.loads(creds.to_json()))
+        except Exception as e:
+            raise HTTPException(401, f"Token refresh failed: {str(e)}")
     
     service = build("gmail", "v1", credentials=creds)
     

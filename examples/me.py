@@ -11,4 +11,5 @@ client.init()
 
 # Get authenticated email info
 # It will return a json object so we print it
+# You can pretty print this or do whatever you wish.
 print(client.me())

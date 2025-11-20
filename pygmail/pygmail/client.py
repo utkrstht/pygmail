@@ -75,7 +75,7 @@ class GmailClient:
             pass
         return code, state
 
-    def authenticate(self, open_browser: bool = True, timeout: int = 300) -> str:
+    def authenticate(self, open_browser: bool = True, timeout: int = 300, allowed_ips: Optional[List[str]] = None) -> str:
         resp = requests.get(f"{self.backend_url}/authorize")
         resp.raise_for_status()
         data = resp.json()
@@ -93,8 +93,12 @@ class GmailClient:
 
         state_to_send = returned_state or expected_state
 
+        payload = {"code": code, "state": state_to_send}
+        if allowed_ips:
+            payload["allowed_ips"] = allowed_ips
+
         token_resp = requests.post(
-            f"{self.backend_url}/exchange_code", json={"code": code, "state": state_to_send}
+            f"{self.backend_url}/exchange_code", json=payload
         )
         token_resp.raise_for_status()
         self.session_token = token_resp.json()["session_token"]
@@ -159,7 +163,6 @@ class GmailClient:
         resp.raise_for_status()
         return resp.json()
 
-    # holy long ass function definition
     def send_email(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None) -> dict:
         if not self.session_token:
             raise RuntimeError("Client not initialized. Call init() first.")
@@ -173,10 +176,8 @@ class GmailClient:
         cc_list = normalize_list(cc)
         bcc_list = normalize_list(bcc)
 
-        # Build data as a list of tuples for proper multipart/form-data handling
         data = [("subject", subject)]
         
-        # Add each recipient separately
         for email in to_list:
             data.append(("to", email))
         
@@ -205,12 +206,10 @@ class GmailClient:
 
             self._rate_limit()
 
-            # Always send as multipart/form-data by using files parameter
-            # even if files list is empty
             resp = requests.post(
                 f"{self.backend_url}/send_email",
                 data=data,
-                files=files if files else [],  # Send empty list instead of None
+                files=files if files else [],
                 headers={"Authorization": f"Bearer {self.session_token}"},
             )
             resp.raise_for_status()
@@ -219,9 +218,11 @@ class GmailClient:
             for f in file_objs:
                 f.close()            
 
-    def authenticate_cli(self, open_browser: bool = True):
-        token = self.authenticate(open_browser=open_browser)
+    def authenticate_cli(self, open_browser: bool = True, allowed_ips: Optional[List[str]] = None):
+        token = self.authenticate(open_browser=open_browser, allowed_ips=allowed_ips)
         print("Authentication successful. Session token saved to:", str(self.session_file))
+        if allowed_ips:
+            print(f"IP restrictions applied: {', '.join(allowed_ips)}")
         return token
 
     def list_emails(self, max_results: int = 10, query: Optional[str] = None, page_token: Optional[str] = None) -> dict:
@@ -277,15 +278,16 @@ def main():
 
     auth_p = sub.add_parser("authenticate", help="Authenticate via browser-based OAuth loopback")
     auth_p.add_argument("--no-browser", action="store_true", help="Print URL instead of opening browser")
+    auth_p.add_argument("--restrict", type=str, help="Comma-separated list of allowed IP addresses")
 
     send_p = sub.add_parser("send", help="Send an email")
     send_p.add_argument("--to", action="append", required=True, help="Recipient (can repeat)")
-    send_p.add_argument("--cc", action="append", help="CC recipient (only one)")
-    send_p.add_argument("--bcc", action="append", help="BCC recipient (only one)")
+    send_p.add_argument("--cc", action="append", help="CC recipient")
+    send_p.add_argument("--bcc", action="append", help="BCC recipient")
     send_p.add_argument("--subject", required=True, help="Subject")
     send_p.add_argument("--body", help="Plain text body")
     send_p.add_argument("--html", help="HTML string or path to .html file")
-    send_p.add_argument("--attach", action="append", help="Attachment file path (only one)")
+    send_p.add_argument("--attach", action="append", help="Attachment file path")
 
     sub.add_parser("me", help="Show authenticated user info")
     init_p = sub.add_parser("init", help="Load session token from a file or paste token")
@@ -295,7 +297,10 @@ def main():
     client = GmailClient()
 
     if args.command == "authenticate":
-        client.authenticate_cli(open_browser=not args.no_browser)
+        allowed_ips = None
+        if args.restrict:
+            allowed_ips = [ip.strip() for ip in args.restrict.split(",")]
+        client.authenticate_cli(open_browser=not args.no_browser, allowed_ips=allowed_ips)
     elif args.command == "send":
         client.init()
         html_content = None
