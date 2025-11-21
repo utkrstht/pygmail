@@ -7,6 +7,7 @@ import requests
 from pathlib import Path
 import time
 import argparse
+import base64
 
 LOCAL_PORT = 8080
 CALLBACK_PATHS = ("/", "/oauth2callback")
@@ -163,6 +164,7 @@ class GmailClient:
         resp.raise_for_status()
         return resp.json()
 
+    # holy long ass function definition
     def send_email(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None) -> dict:
         if not self.session_token:
             raise RuntimeError("Client not initialized. Call init() first.")
@@ -176,8 +178,10 @@ class GmailClient:
         cc_list = normalize_list(cc)
         bcc_list = normalize_list(bcc)
 
+        # Build data as a list of tuples for proper multipart/form-data handling
         data = [("subject", subject)]
         
+        # Add each recipient separately
         for email in to_list:
             data.append(("to", email))
         
@@ -206,10 +210,12 @@ class GmailClient:
 
             self._rate_limit()
 
+            # Always send as multipart/form-data by using files parameter
+            # even if files list is empty
             resp = requests.post(
                 f"{self.backend_url}/send_email",
                 data=data,
-                files=files if files else [],
+                files=files if files else [],  # Send empty list instead of None
                 headers={"Authorization": f"Bearer {self.session_token}"},
             )
             resp.raise_for_status()
@@ -272,6 +278,66 @@ class GmailClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_attachment(self, message_id: str, attachment_id: str, output_path: Optional[Union[str, Path]] = None) -> bytes:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/get_attachment/{message_id}/{attachment_id}",
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        
+        data = resp.json()
+        # Decode base64 data
+        attachment_bytes = base64.urlsafe_b64decode(data["data"])
+        
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(attachment_bytes)
+        
+        return attachment_bytes
+
+    def get_all_attachments(self, message_id: str, output_dir: Union[str, Path] = "./attachments") -> List[Path]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get parsed email to find attachments
+        email_data = self.get_parsed_email(message_id)
+        attachments = email_data.get("attachments", [])
+        
+        if not attachments:
+            return []
+        
+        saved_paths = []
+        for att in attachments:
+            filename = att.get("filename", "unnamed_attachment")
+            attachment_id = att.get("attachment_id")
+            
+            if not attachment_id:
+                continue
+            
+            # Handle duplicate filenames
+            output_path = output_dir / filename
+            counter = 1
+            while output_path.exists():
+                name_parts = filename.rsplit(".", 1)
+                if len(name_parts) == 2:
+                    output_path = output_dir / f"{name_parts[0]}_{counter}.{name_parts[1]}"
+                else:
+                    output_path = output_dir / f"{filename}_{counter}"
+                counter += 1
+            
+            self.get_attachment(message_id, attachment_id, output_path)
+            saved_paths.append(output_path)
+            print(f"Downloaded: {output_path}")
+        
+        return saved_paths
+
 def main():
     parser = argparse.ArgumentParser(prog="pygmail", description="pygmail CLI")
     sub = parser.add_subparsers(dest="command")
@@ -282,16 +348,29 @@ def main():
 
     send_p = sub.add_parser("send", help="Send an email")
     send_p.add_argument("--to", action="append", required=True, help="Recipient (can repeat)")
-    send_p.add_argument("--cc", action="append", help="CC recipient")
-    send_p.add_argument("--bcc", action="append", help="BCC recipient")
+    send_p.add_argument("--cc", action="append", help="CC recipient (only one)")
+    send_p.add_argument("--bcc", action="append", help="BCC recipient (only one)")
     send_p.add_argument("--subject", required=True, help="Subject")
     send_p.add_argument("--body", help="Plain text body")
     send_p.add_argument("--html", help="HTML string or path to .html file")
-    send_p.add_argument("--attach", action="append", help="Attachment file path")
+    send_p.add_argument("--attach", action="append", help="Attachment file path (only one)")
 
     sub.add_parser("me", help="Show authenticated user info")
+    
     init_p = sub.add_parser("init", help="Load session token from a file or paste token")
     init_p.add_argument("--token", help="Session token string (if not provided, loads default session file)")
+
+    list_p = sub.add_parser("list", help="List emails")
+    list_p.add_argument("--max", type=int, default=10, help="Maximum number of emails to list")
+    list_p.add_argument("--query", help="Gmail search query (e.g., 'is:unread from:someone@example.com')")
+
+    get_p = sub.add_parser("get", help="Get email details")
+    get_p.add_argument("message_id", help="Message ID")
+
+    dl_p = sub.add_parser("download", help="Download attachments from an email")
+    dl_p.add_argument("message_id", help="Message ID")
+    dl_p.add_argument("--output", "-o", default="./attachments", help="Output directory (default: ./attachments)")
+    dl_p.add_argument("--attachment-id", help="Specific attachment ID to download (downloads all if not specified)")
 
     args = parser.parse_args()
     client = GmailClient()
@@ -323,5 +402,43 @@ def main():
     elif args.command == "init":
         client.init(args.token)
         print("Token loaded.")
+    elif args.command == "list":
+        client.init()
+        result = client.list_emails(max_results=args.max, query=args.query)
+        print(f"Found {result.get('result_size_estimate', 0)} emails")
+        for msg in result.get("messages", []):
+            print(f"  - {msg['id']}")
+    elif args.command == "get":
+        client.init()
+        email = client.get_parsed_email(args.message_id)
+        print(f"From: {email['headers'].get('From', 'N/A')}")
+        print(f"To: {email['headers'].get('To', 'N/A')}")
+        print(f"Subject: {email['headers'].get('Subject', 'N/A')}")
+        print(f"Date: {email['headers'].get('Date', 'N/A')}")
+        print(f"\nSnippet: {email.get('snippet', 'N/A')}")
+        if email.get('attachments'):
+            print(f"\nAttachments ({len(email['attachments'])}):")
+            for att in email['attachments']:
+                print(f"  - {att['filename']} ({att.get('size', 0)} bytes) [ID: {att['attachment_id']}]")
+    elif args.command == "download":
+        client.init()
+        if args.attachment_id:
+            # Download specific attachment
+            email = client.get_parsed_email(args.message_id)
+            att = next((a for a in email.get('attachments', []) if a['attachment_id'] == args.attachment_id), None)
+            if not att:
+                print(f"Attachment {args.attachment_id} not found")
+            else:
+                filename = att.get('filename', 'unnamed_attachment')
+                output_path = Path(args.output) / filename
+                client.get_attachment(args.message_id, args.attachment_id, output_path)
+                print(f"Downloaded: {output_path}")
+        else:
+            # Download all attachments
+            paths = client.download_all_attachments(args.message_id, args.output)
+            if paths:
+                print(f"Downloaded {len(paths)} attachment(s) to {args.output}")
+            else:
+                print("No attachments found")
     else:
         parser.print_help()

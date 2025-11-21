@@ -2,7 +2,7 @@
 Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
 
-> ![IMPORTANT]
+> [!IMPORTANT]
 > Do note that pygmail is not currently on PyPi
 
 (being made for midnight.hackclub.com)  
@@ -30,6 +30,9 @@ Authenticate using `pygmail authenticate`, to be more secure, you should restric
 `pygmail authenticate --restrict <IP>`  
 or, if using multiple IPs  
 `pygmail authenticate --restrict "<IP>, <IP2>, <IP3>"`
+
+#### **documentation**
+You can find documentation in `DOCUMENTATION.md` in root.
 
 #### **examples**
 Find examples in `examples/`

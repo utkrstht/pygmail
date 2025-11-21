@@ -342,13 +342,11 @@ async def send_email(
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(GoogleRequest())
-            save_token(user_id, json.loads(creds.to_json()))
-        except Exception as e:
-            raise HTTPException(401, f"Token refresh failed: {str(e)}")
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
     service = build("gmail", "v1", credentials=creds)
 
+    # --- hi how's your day going ---
     to_list = to
     cc_list = cc
     bcc_list = bcc
@@ -404,11 +402,8 @@ def me(request: Request):
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(GoogleRequest())
-            save_token(user_id, json.loads(creds.to_json()))
-        except Exception as e:
-            raise HTTPException(401, f"Token refresh failed: {str(e)}")
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
 
     oauth2 = build("oauth2", "v2", credentials=creds)
     user_info = oauth2.userinfo().get().execute()
@@ -433,11 +428,8 @@ def list_emails(
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(GoogleRequest())
-            save_token(user_id, json.loads(creds.to_json()))
-        except Exception as e:
-            raise HTTPException(401, f"Token refresh failed: {str(e)}")
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
     
     service = build("gmail", "v1", credentials=creds)
     
@@ -471,11 +463,8 @@ def get_email(request: Request, message_id: str, format: str = "full"):
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(GoogleRequest())
-            save_token(user_id, json.loads(creds.to_json()))
-        except Exception as e:
-            raise HTTPException(401, f"Token refresh failed: {str(e)}")
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
     
     service = build("gmail", "v1", credentials=creds)
     
@@ -503,11 +492,8 @@ def get_parsed_email(request: Request, message_id: str):
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
     if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(GoogleRequest())
-            save_token(user_id, json.loads(creds.to_json()))
-        except Exception as e:
-            raise HTTPException(401, f"Token refresh failed: {str(e)}")
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
     
     service = build("gmail", "v1", credentials=creds)
     
@@ -519,3 +505,37 @@ def get_parsed_email(request: Request, message_id: str):
     ).execute()
     
     return parse_email_body(message)
+
+
+@app.get("/get_attachment/{message_id}/{attachment_id}")
+def get_attachment(request: Request, message_id: str, attachment_id: str):
+    # --- auth ---
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "Missing session token")
+    session_token = auth_header.split(" ")[1]
+    client_ip = get_client_ip(request)
+    user_id, _ = verify_jwt(session_token, client_ip)
+
+    # --- credentials ---
+    token_json = load_token(user_id)
+    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+        save_token(user_id, json.loads(creds.to_json()))
+    
+    service = build("gmail", "v1", credentials=creds)
+    
+    # Get attachment
+    attachment = service.users().messages().attachments().get(
+        userId="me",
+        messageId=message_id,
+        id=attachment_id
+    ).execute()
+    
+    # Return base64 encoded data
+    return {
+        "attachment_id": attachment_id,
+        "data": attachment["data"],
+        "size": attachment.get("size", 0)
+    }
