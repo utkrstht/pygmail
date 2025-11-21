@@ -245,6 +245,15 @@ You can also use CLI (NOT WORKING CURRENTLY):
 pygmail export <thread_id> --output "emails.csv"
 ```
 
+### **async functions**
+You can use async functions, you use them exactly the same as the normal ones, listed below:
+- `get_all_attachments`
+- `get_attachment_async`
+- `get_parsed_email_async`
+- `get_email_async`
+- `list_emails_async`
+- `send_email_async`
+
 ### **ratelimits**
 - sending 10 emails/minute per user
 - downloading 10 attachments/minute per user
