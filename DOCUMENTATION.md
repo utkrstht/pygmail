@@ -146,6 +146,13 @@ emails
 
 ```
 
+You can get basic information about an email using CLI as well:
+```bash
+pygmail get <message_id>
+```
+This prints `From`, `To`, `Subject`, `Date` and a small snippet of the email.
+It also prints attachments' information, if any.
+
 See [this](examples/read_email.py) for more info.
 
 To fetch any value, (e.g. size of an attachment), you can follow this:
@@ -177,8 +184,10 @@ emails = client.list_emails(query="from:someone@gmail.com")
 emails = client.list_emails(query="is:unread")
 ```
 You can query anything that you can in normal gmail.
-
-See [this](examples/read_email.py) for more info.
+You can use CLI for this as well:
+```bash
+pygmail list --max 50 --query "from:someone@gmail.com" 
+```
 
 To set how many results/emails you can get at a time, you can set `max_results`  
 You can't set it over 100 though, as gmail can only supply 100 at a time  
@@ -186,6 +195,8 @@ If you don't set it, it'll default to 10:
 ```py
 emails = client.list_emails(max_results=50)
 ```
+See [this](examples/read_email.py) for more info.
+
 
 ### **downloading attachments**
 You can download attachments, you need `message_id` and `attachment_id`:
@@ -196,9 +207,20 @@ You can also download all attachments of a message, you only need the `message_i
 ```py
 client.get_all_attachments(message_id=message_id, output_path="./attachments")
 ```
+You can download attachments using CLI as well:
+```bash
+pygmail download <message_id> --output "./attachments" --attachment-id <attachment_id>
+```
+If you don't specify `--attachment-id` then it'll download all available attachments to `--output`  `--output` is by default set to `./attachments`
+
 See [this](examples/get_attachment.py) for more info.
 
-#### **examples**
+### **ratelimits**
+- sending 10 emails/minute per user
+- downloading 10 attachments/minute per user
+- no ratelimit on reading/searching
+
+### **examples**
 Find examples in `examples/`
 - `authenticate.py` --- Authenticate using python instead of CLI with authenticate()  
 - `me.py` --- Check which account is authenticated with me()  

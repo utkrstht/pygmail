@@ -75,7 +75,6 @@ class EmailRequest(BaseModel):
 class ExchangeRequest(BaseModel):
     code: str
     state: Optional[str] = None
-    allowed_ips: Optional[List[str]] = None
 
 class ListEmailsParams(BaseModel):
     max_results: Optional[int] = 10
@@ -106,49 +105,28 @@ def load_token(user_id: str) -> dict:
         return decrypt_token(f.read())
 
 
-def make_jwt(user_id: str, allowed_ips: Optional[List[str]] = None, expires_days: int = 365) -> str:
-    exp_ts = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp())
+def make_jwt(user_id: str, expires_minutes: int = 60 * 24) -> str:
+    exp_ts = int((datetime.datetime.utcnow() + datetime.timedelta(minutes=expires_minutes)).timestamp())
     payload = {"sub": user_id, "exp": exp_ts}
-    if allowed_ips:
-        payload["allowed_ips"] = allowed_ips
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def verify_jwt(token: str, client_ip: Optional[str] = None) -> tuple[str, Optional[List[str]]]:
+def verify_jwt(token: str) -> str:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload["sub"]
-        allowed_ips = payload.get("allowed_ips")
-        
-        # Check IP restriction if present
-        if allowed_ips and client_ip:
-            if client_ip not in allowed_ips:
-                raise HTTPException(403, f"Access denied: IP {client_ip} not in allowed list")
-        
-        return user_id, allowed_ips
+        return payload["sub"]
     except JWTError:
         raise HTTPException(401, "Invalid session token")
 
 
-def get_client_ip(request: Request) -> str:
-    # Check X-Forwarded-For first (for proxies)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    
-    # Check X-Real-IP
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
-    
-    # Fall back to direct connection
-    return request.client.host if request.client else "unknown"
-
-
 MAX_EMAILS = 10
 WINDOW_SECONDS = 60
+MAX_ATTACHMENTS = 10
+ATTACHMENT_WINDOW_SECONDS = 60
 RATE_LIMIT_STORE: dict = {}
+ATTACHMENT_RATE_LIMIT_STORE: dict = {}
 RATE_LIMIT_LOCK = threading.Lock()
+ATTACHMENT_RATE_LIMIT_LOCK = threading.Lock()
 
 
 def check_rate(user_id: str):
@@ -166,6 +144,25 @@ def check_rate(user_id: str):
             raise HTTPException(
                 status_code=429,
                 detail=f"Rate limit exceeded: max {MAX_EMAILS} emails per {WINDOW_SECONDS} seconds",
+                headers=headers,
+            )
+        dq.append(now)
+
+def check_attachment_rate(user_id: str):
+    now = time.time()
+    with ATTACHMENT_RATE_LIMIT_LOCK:
+        dq = ATTACHMENT_RATE_LIMIT_STORE.get(user_id)
+        if dq is None:
+            dq = deque()
+            ATTACHMENT_RATE_LIMIT_STORE[user_id] = dq
+        while dq and now - dq[0] >= ATTACHMENT_WINDOW_SECONDS:
+            dq.popleft()
+        if len(dq) >= MAX_ATTACHMENTS:
+            retry_after = int(ATTACHMENT_WINDOW_SECONDS - (now - dq[0])) + 1
+            headers = {"Retry-After": str(retry_after)}
+            raise HTTPException(
+                status_code=429,
+                detail=f"Attachment rate limit exceeded: max {MAX_ATTACHMENTS} downloads per minute",
                 headers=headers,
             )
         dq.append(now)
@@ -298,7 +295,7 @@ def exchange_code(req: ExchangeRequest):
     token_json = json.loads(creds.to_json())
     user_id = secrets.token_urlsafe(16)
     save_token(user_id, token_json)
-    session_token = make_jwt(user_id, allowed_ips=req.allowed_ips)
+    session_token = make_jwt(user_id)
     return JSONResponse(content={"session_token": session_token})
 
 @app.exception_handler(RequestValidationError)
@@ -325,6 +322,7 @@ async def send_email(
     subject: str = Form(...),
     body: Optional[str] = Form(None),
     html: Optional[str] = Form(None),
+    reply_to_thread: Optional[str] = Form(None),
     attachments: List[UploadFile] = File(default=[])
 ):
     # --- auth ---
@@ -332,8 +330,7 @@ async def send_email(
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    client_ip = get_client_ip(request)
-    user_id, _ = verify_jwt(session_token, client_ip)
+    user_id = verify_jwt(session_token)
 
     # --- rate limit ---
     check_rate(user_id)
@@ -387,8 +384,13 @@ async def send_email(
             root.attach(part)
 
     raw = base64.urlsafe_b64encode(root.as_bytes()).decode()
-    result = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-    return {"message_id": result["id"]}
+    
+    send_body = {"raw": raw}
+    if reply_to_thread:
+        send_body["threadId"] = reply_to_thread
+    
+    result = service.users().messages().send(userId="me", body=send_body).execute()
+    return {"message_id": result["id"], "thread_id": result.get("threadId")}
 
 @app.get("/me")
 def me(request: Request):
@@ -396,8 +398,7 @@ def me(request: Request):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ", 1)[1]
-    client_ip = get_client_ip(request)
-    user_id, _ = verify_jwt(session_token, client_ip)
+    user_id = verify_jwt(session_token)
 
     token_json = load_token(user_id)
     creds = Credentials.from_authorized_user_info(token_json, SCOPES)
@@ -421,8 +422,7 @@ def list_emails(
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    client_ip = get_client_ip(request)
-    user_id, _ = verify_jwt(session_token, client_ip)
+    user_id = verify_jwt(session_token)
 
     # --- credentials ---
     token_json = load_token(user_id)
@@ -456,8 +456,7 @@ def get_email(request: Request, message_id: str, format: str = "full"):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    client_ip = get_client_ip(request)
-    user_id, _ = verify_jwt(session_token, client_ip)
+    user_id = verify_jwt(session_token)
 
     # --- credentials ---
     token_json = load_token(user_id)
@@ -485,8 +484,7 @@ def get_parsed_email(request: Request, message_id: str):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    client_ip = get_client_ip(request)
-    user_id, _ = verify_jwt(session_token, client_ip)
+    user_id = verify_jwt(session_token)
 
     # --- credentials ---
     token_json = load_token(user_id)
@@ -514,8 +512,10 @@ def get_attachment(request: Request, message_id: str, attachment_id: str):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing session token")
     session_token = auth_header.split(" ")[1]
-    client_ip = get_client_ip(request)
-    user_id, _ = verify_jwt(session_token, client_ip)
+    user_id = verify_jwt(session_token)
+
+    # --- rate limit for attachments ---
+    check_attachment_rate(user_id)
 
     # --- credentials ---
     token_json = load_token(user_id)

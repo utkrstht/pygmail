@@ -36,18 +36,14 @@ You can find documentation in `DOCUMENTATION.md` in root.
 
 #### **examples**
 Find examples in `examples/`
-- `authenticate.py` --- Authenticate using python instead of CLI with client.authenticate()  
-- `me.py` --- Check which account is authenticated with client.me()  
-- `read_email.py` --- Read emails with client.list_emails()  
-- `send_email.py` --- Send emails with client.send_email()  
-
-#### **sending emails**  
-You can see examples for sending emails in `examples/` in [here](https://github.com/utkrstht/pygmail).
-
-#### **reading emails**
-You can see examples for reading emails in `examples/` in [here](https://github.com/utkrstht/pygmail).
+- `authenticate.py` --- Authenticate using python instead of CLI with authenticate()  
+- `me.py` --- Check which account is authenticated with me()  
+- `read_email.py` --- Read emails with list_emails()  
+- `read_all_emails.py` --- Read all emails using page tokens and list_emails()
+- `send_email.py` --- Send emails with send_email()  
+- `get_attachment.py` --- Get attachments using get_attachment() 
 
 ### common errors
-`401 Client Error: Unauthorized for url`--- You're not authenticated, See above on how to.  
+`401 Client Error: Unauthorized for url`--- You're not authenticated, See [this](#authenticate) on how to.  
 `[WinError 10061] No connection could be made because the target machine actively refused it` --- The backend server is down, wait a few minutes or so.  
 `500 Server Error` --- Server is under maintence, and so the server ran into an error trying to process your request.
