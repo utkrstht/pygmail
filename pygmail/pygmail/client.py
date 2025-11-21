@@ -279,17 +279,6 @@ class GmailClient:
         return resp.json()
 
     def get_attachment(self, message_id: str, attachment_id: str, output_path: Optional[Union[str, Path]] = None) -> bytes:
-        """
-        Download an attachment from an email.
-        
-        Args:
-            message_id: The email message ID
-            attachment_id: The attachment ID from get_parsed_email()
-            output_path: Optional path to save the attachment. If None, returns raw bytes.
-        
-        Returns:
-            Raw attachment bytes
-        """
         if not self.session_token:
             raise RuntimeError("Client not initialized. Call init() first.")
         
@@ -314,16 +303,6 @@ class GmailClient:
         return attachment_bytes
 
     def download_all_attachments(self, message_id: str, output_dir: Union[str, Path] = "./attachments") -> List[Path]:
-        """
-        Download all attachments from an email.
-        
-        Args:
-            message_id: The email message ID
-            output_dir: Directory to save attachments (default: ./attachments)
-        
-        Returns:
-            List of paths where attachments were saved
-        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -423,7 +402,6 @@ class GmailClient:
         except IOError as e:
             print(f"Error writing file: {e}")
 
-    # Async versions
     async def _async_rate_limit(self):
         now = time.time()
         elapsed = now - self._last_call

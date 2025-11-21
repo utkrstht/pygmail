@@ -215,6 +215,36 @@ If you don't specify `--attachment-id` then it'll download all available attachm
 
 See [this](examples/get_attachment.py) for more info.
 
+### **export emails**
+You can export emails as csv, you can either export an entire thread, or a specific list of messages
+```py
+from pygmail import GmailClient
+
+# Create pygmail instance
+client = GmailClient()
+
+# Initialize client
+# Make sure you authenticated before using `pygmail authenticate` or client.authenticate()
+# or that you passed the session token directly as a string like this:
+# client.init("SESSION_TOKEN")
+client.init()
+
+# You can supply a list of message IDs
+# output file, if not defined is "emails_export.csv"
+message_ids = ["18e63b7d...", "18e63a1a..."] 
+client.export_emails(target=message_ids, output_file="selected_emails.csv")
+
+# You can also export emails found from a query.
+client.export_emails(target="from:github.com has:attachment", output_file="github_files.csv")
+
+# You can export emails from a thread using queries
+client.export_emails(target="thread:18e63b7d12345", output_file="github_files.csv")
+```
+You can also use CLI (NOT WORKING CURRENTLY):
+```bash
+pygmail export <thread_id> --output "emails.csv"
+```
+
 ### **ratelimits**
 - sending 10 emails/minute per user
 - downloading 10 attachments/minute per user
