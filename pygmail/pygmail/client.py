@@ -1,541 +1,699 @@
-"""
-Usage:
-uvicorn backend:app
-"""
-import os
-import json
-import secrets
-import base64
-import time
-import datetime
-from collections import deque
 import threading
+import webbrowser
 from typing import List, Optional, Union
-import traceback
-
-from fastapi import FastAPI, Request, HTTPException, Form, UploadFile, File
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from jose import JWTError, jwt
+from urllib import parse
+import http.server
+import requests
 from pathlib import Path
-from cryptography.fernet import Fernet
-from google_auth_oauthlib.flow import Flow
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request as GoogleRequest
-from googleapiclient.discovery import build
+import time
+import argparse
+import base64
+import asyncio
+import aiohttp
+import aiofiles
+import csv
 
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-
-CLIENT_SECRETS_FILE = os.environ.get("CLIENT_SECRETS_FILE", "credentials.json")
-SCOPES = [
-    "openid",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-]
-JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_urlsafe(32))
-JWT_ALGORITHM = "HS256"
-TOKEN_STORE_DIR = os.environ.get("TOKEN_STORE_DIR", "./tokens")
-
-_fkey = os.environ.get("FERNET_KEY")
-if _fkey:
-    FERNET_KEY = _fkey.encode() if isinstance(_fkey, str) else _fkey
-else:
-    FERNET_KEY = Fernet.generate_key()
-fernet = Fernet(FERNET_KEY)
-
-os.makedirs(TOKEN_STORE_DIR, exist_ok=True)
-
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
-
-class AttachmentModel(BaseModel):
-    filename: str
-    content: str  # base64-encoded
+LOCAL_PORT = 8080
+CALLBACK_PATHS = ("/", "/oauth2callback")
 
 
-class EmailRequest(BaseModel):
-    to: List[str]
-    cc: Optional[List[str]] = None
-    bcc: Optional[List[str]] = None
-    subject: str
-    body: Optional[str] = None
-    html: Optional[str] = None
-    attachments: Optional[List[AttachmentModel]] = None
+class GmailClient:
+    def __init__(self, backend_url: str = "http://37.27.51.34:31873", session_file: Union[str, Path] = None, rpm: int = 60):
+        self.backend_url = backend_url.rstrip("/")
+        self.session_file = Path(session_file) if session_file else Path.home() / ".pygmail" / "session.token"
+        self.session_token: Optional[str] = None
+        self.rpm = rpm
+        self._last_call = 0
+        self._min_interval = 60.0 / rpm
 
+    class OAuthHandler(http.server.BaseHTTPRequestHandler):
+        server_data = {"code": None, "state": None}
+        server_event = threading.Event()
 
-class ExchangeRequest(BaseModel):
-    code: str
-    state: Optional[str] = None
+        def do_GET(self):
+            parsed = parse.urlparse(self.path)
+            if parsed.path not in CALLBACK_PATHS:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"Not found")
+                return
 
-class ListEmailsParams(BaseModel):
-    max_results: Optional[int] = 10
-    query: Optional[str] = None  # Gmail search query
-    page_token: Optional[str] = None
+            qs = parse.parse_qs(parsed.query)
+            code = qs.get("code", [None])[0]
+            state = qs.get("state", [None])[0]
+            self.__class__.server_data["code"] = code
+            self.__class__.server_data["state"] = state
+            self.__class__.server_event.set()
 
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body><h2>Authentication complete, you can close this window.</h2></body></html>")
 
+        def log_message(self, format, *args):
+            return
 
-def encrypt_token(token_json: dict) -> bytes:
-    return fernet.encrypt(json.dumps(token_json).encode())
+    def _run_local_server(self, timeout: int = 300):
+        handler = self.OAuthHandler
+        handler.server_data = {"code": None, "state": None}
+        handler.server_event = threading.Event()
 
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", LOCAL_PORT), handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
 
-def decrypt_token(data: bytes) -> dict:
-    return json.loads(fernet.decrypt(data).decode())
-
-
-def save_token(user_id: str, token_json: dict):
-    path = os.path.join(TOKEN_STORE_DIR, f"{user_id}.token")
-    with open(path, "wb") as f:
-        f.write(encrypt_token(token_json))
-
-
-def load_token(user_id: str) -> dict:
-    path = os.path.join(TOKEN_STORE_DIR, f"{user_id}.token")
-    if not os.path.exists(path):
-        raise HTTPException(401, "Token not found for user")
-    with open(path, "rb") as f:
-        return decrypt_token(f.read())
-
-
-def make_jwt(user_id: str, expires_minutes: int = 60 * 24) -> str:
-    exp_ts = int((datetime.datetime.utcnow() + datetime.timedelta(minutes=expires_minutes)).timestamp())
-    payload = {"sub": user_id, "exp": exp_ts}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
-def verify_jwt(token: str) -> str:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload["sub"]
-    except JWTError:
-        raise HTTPException(401, "Invalid session token")
-
-
-MAX_EMAILS = 10
-WINDOW_SECONDS = 60
-MAX_ATTACHMENTS = 10
-ATTACHMENT_WINDOW_SECONDS = 60
-RATE_LIMIT_STORE: dict = {}
-ATTACHMENT_RATE_LIMIT_STORE: dict = {}
-RATE_LIMIT_LOCK = threading.Lock()
-ATTACHMENT_RATE_LIMIT_LOCK = threading.Lock()
-
-
-def check_rate(user_id: str):
-    now = time.time()
-    with RATE_LIMIT_LOCK:
-        dq = RATE_LIMIT_STORE.get(user_id)
-        if dq is None:
-            dq = deque()
-            RATE_LIMIT_STORE[user_id] = dq
-        while dq and now - dq[0] >= WINDOW_SECONDS:
-            dq.popleft()
-        if len(dq) >= MAX_EMAILS:
-            retry_after = int(WINDOW_SECONDS - (now - dq[0])) + 1
-            headers = {"Retry-After": str(retry_after)}
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded: max {MAX_EMAILS} emails per {WINDOW_SECONDS} seconds",
-                headers=headers,
-            )
-        dq.append(now)
-
-def check_attachment_rate(user_id: str):
-    now = time.time()
-    with ATTACHMENT_RATE_LIMIT_LOCK:
-        dq = ATTACHMENT_RATE_LIMIT_STORE.get(user_id)
-        if dq is None:
-            dq = deque()
-            ATTACHMENT_RATE_LIMIT_STORE[user_id] = dq
-        while dq and now - dq[0] >= ATTACHMENT_WINDOW_SECONDS:
-            dq.popleft()
-        if len(dq) >= MAX_ATTACHMENTS:
-            retry_after = int(ATTACHMENT_WINDOW_SECONDS - (now - dq[0])) + 1
-            headers = {"Retry-After": str(retry_after)}
-            raise HTTPException(
-                status_code=429,
-                detail=f"Attachment rate limit exceeded: max {MAX_ATTACHMENTS} downloads per minute",
-                headers=headers,
-            )
-        dq.append(now)
-
-def make_msg(req: EmailRequest) -> str:
-    if req.attachments:
-        root = MIMEMultipart("mixed")
-    elif req.html:
-        root = MIMEMultipart("alternative")
-    else:
-        root = MIMEMultipart()
-
-    root["To"] = ", ".join(req.to)
-    if req.cc:
-        root["Cc"] = ", ".join(req.cc)
-    if req.bcc:
-        root["Bcc"] = ", ".join(req.bcc)
-    root["Subject"] = req.subject
-
-    if req.body or req.html:
-        if req.html and req.body:
-            alt = MIMEMultipart("alternative")
-            alt.attach(MIMEText(req.body, "plain"))
-            alt.attach(MIMEText(req.html, "html"))
-            root.attach(alt)
-        elif req.html:
-            root.attach(MIMEText(req.html, "html"))
-        else:
-            root.attach(MIMEText(req.body, "plain"))
-
-    if req.attachments:
-        for a in req.attachments:
+        waited = handler.server_event.wait(timeout=timeout)
+        if not waited:
             try:
-                content_bytes = base64.b64decode(a.content)
+                httpd.shutdown()
+                httpd.server_close()
             except Exception:
-                continue
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(content_bytes)
-            encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f'attachment; filename="{a.filename}"')
-            root.attach(part)
+                pass
+            return None, None
 
-    return base64.urlsafe_b64encode(root.as_bytes()).decode()
+        code = handler.server_data.get("code")
+        state = handler.server_data.get("state")
+        try:
+            httpd.shutdown()
+            httpd.server_close()
+        except Exception:
+            pass
+        return code, state
 
-def parse_email_body(message: dict) -> dict:
-    result = {
-        "id": message.get("id"),
-        "thread_id": message.get("threadId"),
-        "snippet": message.get("snippet"),
-        "headers": {},
-        "body_plain": "",
-        "body_html": "",
-        "attachments": []
-    }
-    
-    # Parse headers
-    headers = message.get("payload", {}).get("headers", [])
-    for header in headers:
-        name = header.get("name")
-        if name in ["From", "To", "Subject", "Date", "Cc", "Bcc"]:
-            result["headers"][name] = header.get("value")
-    
-    # Parse body
-    def parse_parts(parts):
-        for part in parts:
-            mime_type = part.get("mimeType")
-            body = part.get("body", {})
-            
-            if mime_type == "text/plain":
-                data = body.get("data")
-                if data:
-                    result["body_plain"] += base64.urlsafe_b64decode(data).decode("utf-8")
-            elif mime_type == "text/html":
-                data = body.get("data")
-                if data:
-                    result["body_html"] += base64.urlsafe_b64decode(data).decode("utf-8")
-            elif "multipart" in mime_type:
-                sub_parts = part.get("parts", [])
-                parse_parts(sub_parts)
-            elif body.get("attachmentId"):
-                result["attachments"].append({
-                    "filename": part.get("filename"),
-                    "mime_type": mime_type,
-                    "attachment_id": body.get("attachmentId"),
-                    "size": body.get("size")
-                })
-    
-    payload = message.get("payload", {})
-    if "parts" in payload:
-        parse_parts(payload["parts"])
-    else:
-        # Single part message
-        body = payload.get("body", {})
-        data = body.get("data")
-        if data:
-            mime_type = payload.get("mimeType")
-            decoded = base64.urlsafe_b64decode(data).decode("utf-8")
-            if mime_type == "text/html":
-                result["body_html"] = decoded
-            else:
-                result["body_plain"] = decoded
-    
-    return result
+    def authenticate(self, open_browser: bool = True, timeout: int = 300) -> str:
+        resp = requests.get(f"{self.backend_url}/authorize")
+        resp.raise_for_status()
+        data = resp.json()
+        auth_url = data["auth_url"]
+        expected_state = data.get("state")
 
-OAUTH_STATE = {}
-
-@app.get("/authorize")
-def authorize():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri="http://127.0.0.1:8080/"
-    )
-    auth_url, state = flow.authorization_url(
-        prompt="consent", access_type="offline", include_granted_scopes="true"
-    )
-    OAUTH_STATE[state] = time.time()
-    return {"auth_url": auth_url, "state": state}
-
-
-@app.post("/exchange_code")
-def exchange_code(req: ExchangeRequest):
-    if not req.state or req.state not in OAUTH_STATE:
-        raise HTTPException(400, "Invalid or missing state")
-    OAUTH_STATE.pop(req.state, None)
-
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri="http://127.0.0.1:8080/"
-    )
-    flow.fetch_token(code=req.code)
-    creds = flow.credentials
-    token_json = json.loads(creds.to_json())
-    user_id = secrets.token_urlsafe(16)
-    save_token(user_id, token_json)
-    session_token = make_jwt(user_id)
-    return JSONResponse(content={"session_token": session_token})
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    errors = [
-        {
-            "type": err["type"],
-            "loc": err["loc"],
-            "msg": err["msg"]
-        }
-        for err in exc.errors()
-    ]
-    return JSONResponse(
-        status_code=422,
-        content={"detail": errors}
-    )
-
-@app.post("/send_email")
-async def send_email(
-    request: Request,
-    to: List[str] = Form(...),  
-    cc: List[str] = Form(default=[]),
-    bcc: List[str] = Form(default=[]),  
-    subject: str = Form(...),
-    body: Optional[str] = Form(None),
-    html: Optional[str] = Form(None),
-    reply_to_thread: Optional[str] = Form(None),
-    attachments: List[UploadFile] = File(default=[])
-):
-    # --- auth ---
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(401, "Missing session token")
-    session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
-
-    # --- rate limit ---
-    check_rate(user_id)
-
-    # --- credentials ---
-    token_json = load_token(user_id)
-    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
-    service = build("gmail", "v1", credentials=creds)
-
-    # --- hi how's your day going ---
-    to_list = to
-    cc_list = cc
-    bcc_list = bcc
-
-    # --- build email ---
-    if attachments:
-        root = MIMEMultipart("mixed")
-    elif html:
-        root = MIMEMultipart("alternative")
-    else:
-        root = MIMEMultipart()
-
-    root["To"] = ", ".join(to_list)
-    if cc_list:
-        root["Cc"] = ", ".join(cc_list)
-    if bcc_list:
-        root["Bcc"] = ", ".join(bcc_list)
-    root["Subject"] = subject
-
-    if html or body:
-        if html and body:
-            alt = MIMEMultipart("alternative")
-            alt.attach(MIMEText(body, "plain"))
-            alt.attach(MIMEText(html, "html"))
-            root.attach(alt)
-        elif html:
-            root.attach(MIMEText(html, "html"))
+        if open_browser:
+            webbrowser.open(auth_url)
         else:
-            root.attach(MIMEText(body, "plain"))
+            print("Open this URL in your browser:", auth_url)
 
-    if attachments:
-        for file in attachments:
-            content = await file.read()
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(content)
-            encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f'attachment; filename="{file.filename}"')
-            root.attach(part)
+        code, returned_state = self._run_local_server(timeout=timeout)
+        if not code:
+            raise RuntimeError("Failed to receive OAuth2 code from Google (timeout or error).")
 
-    raw = base64.urlsafe_b64encode(root.as_bytes()).decode()
+        state_to_send = returned_state or expected_state
+
+        token_resp = requests.post(
+            f"{self.backend_url}/exchange_code", json={"code": code, "state": state_to_send}
+        )
+        token_resp.raise_for_status()
+        self.session_token = token_resp.json()["session_token"]
+
+        try:
+            self.session_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.session_file, "w") as f:
+                f.write(self.session_token)
+        except Exception:
+            pass
+
+        return self.session_token
     
-    send_body = {"raw": raw}
-    if reply_to_thread:
-        send_body["threadId"] = reply_to_thread
-    
-    result = service.users().messages().send(userId="me", body=send_body).execute()
-    return {"message_id": result["id"], "thread_id": result.get("threadId")}
+    def _rate_limit(self):
+        now = time.time()
+        elapsed = now - self._last_call
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
+        self._last_call = time.time()
 
-@app.get("/me")
-def me(request: Request):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(401, "Missing session token")
-    session_token = auth_header.split(" ", 1)[1]
-    user_id = verify_jwt(session_token)
+    def init(self, session_token_or_path: Optional[Union[str, Path]] = None) -> None:
+        if session_token_or_path is None:
+            if not self.session_file.exists():
+                raise RuntimeError("No session token found. Run authenticate() first or pass a token/path to init().")
+            with open(self.session_file, "r") as f:
+                self.session_token = f.read().strip()
+            return
 
-    token_json = load_token(user_id)
-    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+        candidate = Path(session_token_or_path)
+        if candidate.exists():
+            with open(candidate, "r") as f:
+                self.session_token = f.read().strip()
+            try:
+                self.session_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.session_file, "w") as f:
+                    f.write(self.session_token)
+            except Exception:
+                pass
+            return
 
-    oauth2 = build("oauth2", "v2", credentials=creds)
-    user_info = oauth2.userinfo().get().execute()
-    return {"user": user_info}
+        self.session_token = str(session_token_or_path).strip()
+        try:
+            self.session_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.session_file, "w") as f:
+                f.write(self.session_token)
+        except Exception:
+            pass
 
-@app.get("/list_emails")
-def list_emails(
-    request: Request,
-    max_results: int = 10,
-    query: Optional[str] = None,
-    page_token: Optional[str] = None
-):
-    # --- auth ---
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(401, "Missing session token")
-    session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+    def is_authorized(self) -> bool:
+        if not self.session_token:
+            return False
+        try:
+            resp = requests.get(f"{self.backend_url}/me", headers={"Authorization": f"Bearer {self.session_token}"})
+            return resp.status_code == 200
+        except Exception:
+            return False
 
-    # --- credentials ---
-    token_json = load_token(user_id)
-    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
-    
-    service = build("gmail", "v1", credentials=creds)
-    
-    # List messages
-    params = {"userId": "me", "maxResults": max_results}
-    if query:
-        params["q"] = query
-    if page_token:
-        params["pageToken"] = page_token
-    
-    results = service.users().messages().list(**params).execute()
-    messages = results.get("messages", [])
-    
-    return {
-        "messages": messages,
-        "next_page_token": results.get("nextPageToken"),
-        "result_size_estimate": results.get("resultSizeEstimate")
-    }
+    def me(self) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        resp = requests.get(f"{self.backend_url}/me", headers={"Authorization": f"Bearer {self.session_token}"})
+        resp.raise_for_status()
+        return resp.json()
 
-@app.get("/get_email/{message_id}")
-def get_email(request: Request, message_id: str, format: str = "full"):
-    # --- auth ---
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(401, "Missing session token")
-    session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+    # holy long ass function definition
+    def send_email(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None, reply_to_thread: Optional[str] = None) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
 
-    # --- credentials ---
-    token_json = load_token(user_id)
-    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
-    
-    service = build("gmail", "v1", credentials=creds)
-    
-    # Get message
-    message = service.users().messages().get(
-        userId="me", 
-        id=message_id,
-        format=format
-    ).execute()
-    
-    return message
+        def normalize_list(v):
+            if v is None:
+                return []
+            return [str(x) for x in v] if isinstance(v, (list, tuple)) else [str(v)]
 
+        to_list = normalize_list(to)
+        cc_list = normalize_list(cc)
+        bcc_list = normalize_list(bcc)
 
-@app.get("/get_parsed_email/{message_id}")
-def get_parsed_email(request: Request, message_id: str):
-    # --- auth ---
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(401, "Missing session token")
-    session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+        # Build data as a list of tuples for proper multipart/form-data handling
+        data = [("subject", subject)]
+        
+        # Add each recipient separately
+        for email in to_list:
+            data.append(("to", email))
+        
+        for email in cc_list:
+            data.append(("cc", email))
+        
+        for email in bcc_list:
+            data.append(("bcc", email))
+        
+        if body:
+            data.append(("body", body))
+        if html:
+            data.append(("html", html))
+        if reply_to_thread:
+            data.append(("reply_to_thread", reply_to_thread))
 
-    # --- credentials ---
-    token_json = load_token(user_id)
-    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
-    
-    service = build("gmail", "v1", credentials=creds)
-    
-    # Get message
-    message = service.users().messages().get(
-        userId="me", 
-        id=message_id,
-        format="full"
-    ).execute()
-    
-    return parse_email_body(message)
+        files = []
+        file_objs = []
+        try:
+            if attachments:
+                for p in attachments:
+                    pth = Path(p)
+                    if not pth.exists():
+                        raise FileNotFoundError(f"Attachment not found: {p}")
+                    f = open(pth, "rb")
+                    file_objs.append(f)
+                    files.append(("attachments", (pth.name, f)))
 
+            self._rate_limit()
 
-@app.get("/get_attachment/{message_id}/{attachment_id}")
-def get_attachment(request: Request, message_id: str, attachment_id: str):
-    # --- auth ---
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(401, "Missing session token")
-    session_token = auth_header.split(" ")[1]
-    user_id = verify_jwt(session_token)
+            # Always send as multipart/form-data by using files parameter
+            # even if files list is empty
+            resp = requests.post(
+                f"{self.backend_url}/send_email",
+                data=data,
+                files=files if files else [],  # Send empty list instead of None
+                headers={"Authorization": f"Bearer {self.session_token}"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        finally:
+            for f in file_objs:
+                f.close()            
 
-    # --- rate limit for attachments ---
-    check_attachment_rate(user_id)
+    def authenticate_cli(self, open_browser: bool = True):
+        token = self.authenticate(open_browser=open_browser)
+        print("Authentication successful. Session token saved to:", str(self.session_file))
+        return token
 
-    # --- credentials ---
-    token_json = load_token(user_id)
-    creds = Credentials.from_authorized_user_info(token_json, SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        save_token(user_id, json.loads(creds.to_json()))
+    def list_emails(self, max_results: int = 10, query: Optional[str] = None, page_token: Optional[str] = None) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        params = {"max_results": max_results}
+        if query:
+            params["query"] = query
+        if page_token:
+            params["page_token"] = page_token
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/list_emails",
+            params=params,
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_email(self, message_id: str, format: str = "full") -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/get_email/{message_id}",
+            params={"format": format},
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_parsed_email(self, message_id: str) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/get_parsed_email/{message_id}",
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_attachment(self, message_id: str, attachment_id: str, output_path: Optional[Union[str, Path]] = None) -> bytes:
+        """
+        Download an attachment from an email.
+        
+        Args:
+            message_id: The email message ID
+            attachment_id: The attachment ID from get_parsed_email()
+            output_path: Optional path to save the attachment. If None, returns raw bytes.
+        
+        Returns:
+            Raw attachment bytes
+        """
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        self._rate_limit()
+        
+        resp = requests.get(
+            f"{self.backend_url}/get_attachment/{message_id}/{attachment_id}",
+            headers={"Authorization": f"Bearer {self.session_token}"}
+        )
+        resp.raise_for_status()
+        
+        data = resp.json()
+        # Decode base64 data
+        attachment_bytes = base64.urlsafe_b64decode(data["data"])
+        
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(attachment_bytes)
+        
+        return attachment_bytes
+
+    def download_all_attachments(self, message_id: str, output_dir: Union[str, Path] = "./attachments") -> List[Path]:
+        """
+        Download all attachments from an email.
+        
+        Args:
+            message_id: The email message ID
+            output_dir: Directory to save attachments (default: ./attachments)
+        
+        Returns:
+            List of paths where attachments were saved
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get parsed email to find attachments
+        email_data = self.get_parsed_email(message_id)
+        attachments = email_data.get("attachments", [])
+        
+        if not attachments:
+            return []
+        
+        saved_paths = []
+        for att in attachments:
+            filename = att.get("filename", "unnamed_attachment")
+            attachment_id = att.get("attachment_id")
+            
+            if not attachment_id:
+                continue
+            
+            # Handle duplicate filenames
+            output_path = output_dir / filename
+            counter = 1
+            while output_path.exists():
+                name_parts = filename.rsplit(".", 1)
+                if len(name_parts) == 2:
+                    output_path = output_dir / f"{name_parts[0]}_{counter}.{name_parts[1]}"
+                else:
+                    output_path = output_dir / f"{filename}_{counter}"
+                counter += 1
+            
+            self.get_attachment(message_id, attachment_id, output_path)
+            saved_paths.append(output_path)
+            print(f"Downloaded: {output_path}")
+        
+        return saved_paths
     
-    service = build("gmail", "v1", credentials=creds)
-    
-    # Get attachment
-    attachment = service.users().messages().attachments().get(
-        userId="me",
-        messageId=message_id,
-        id=attachment_id
-    ).execute()
-    
-    # Return base64 encoded data
-    return {
-        "attachment_id": attachment_id,
-        "data": attachment["data"],
-        "size": attachment.get("size", 0)
-    }
+    def export_emails(self, target: Union[str, List[str]], output_file: str = "emails_export.csv", format: str = "csv"):
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        messages_to_fetch = []
+        
+        print(f"Gathering message list for target: {target}...")
+
+        if isinstance(target, list):
+            messages_to_fetch = [{"id": mid} for mid in target]
+        elif target.lower() == "all":
+            page_token = None
+            while True:
+                res = self.list_emails(max_results=50, page_token=page_token)
+                msgs = res.get("messages", [])
+                messages_to_fetch.extend(msgs)
+                print(f"  Found {len(messages_to_fetch)} messages so far...")
+                page_token = res.get("next_page_token")
+                if not page_token:
+                    break
+        elif target.startswith("thread:"):
+            thread_id = target.split(":")[1]
+            res = self.list_emails(max_results=100, query=f"thread:{thread_id}")
+            messages_to_fetch = res.get("messages", [])
+        else:
+            res = self.list_emails(max_results=100, query=target)
+            messages_to_fetch = res.get("messages", [])
+
+        print(f"Starting download of {len(messages_to_fetch)} emails.")
+        
+        fieldnames = ["id", "thread_id", "date", "from", "to", "subject", "snippet", "body_plain", "has_attachments"]
+        
+        try:
+            with open(output_file, mode='w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for i, msg_obj in enumerate(messages_to_fetch):
+                    mid = msg_obj["id"]
+                    try:
+                        data = self.get_parsed_email(mid)
+                        row = {
+                            "id": data.get("id"),
+                            "thread_id": data.get("thread_id"),
+                            "date": data["headers"].get("Date"),
+                            "from": data["headers"].get("From"),
+                            "to": data["headers"].get("To"),
+                            "subject": data["headers"].get("Subject"),
+                            "snippet": data.get("snippet"),
+                            "body_plain": data.get("body_plain", "")[:32000],
+                            "has_attachments": "Yes" if data.get("attachments") else "No"
+                        }
+                        writer.writerow(row)
+                        if i % 5 == 0:
+                            print(f"  Processed {i+1}/{len(messages_to_fetch)}...")
+                            
+                    except Exception as e:
+                        print(f"  Failed to fetch message {mid}: {e}")
+                        
+            print(f"Successfully exported {len(messages_to_fetch)} emails to {output_file}")
+            
+        except IOError as e:
+            print(f"Error writing file: {e}")
+
+    # Async versions
+    async def _async_rate_limit(self):
+        now = time.time()
+        elapsed = now - self._last_call
+        if elapsed < self._min_interval:
+            await asyncio.sleep(self._min_interval - elapsed)
+        self._last_call = time.time()
+
+    async def send_email_async(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None, reply_to_thread: Optional[str] = None) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+
+        def normalize_list(v):
+            if v is None:
+                return []
+            return [str(x) for x in v] if isinstance(v, (list, tuple)) else [str(v)]
+
+        to_list = normalize_list(to)
+        cc_list = normalize_list(cc)
+        bcc_list = normalize_list(bcc)
+
+        form_data = aiohttp.FormData()
+        form_data.add_field("subject", subject)
+        
+        for email in to_list:
+            form_data.add_field("to", email)
+        for email in cc_list:
+            form_data.add_field("cc", email)
+        for email in bcc_list:
+            form_data.add_field("bcc", email)
+        
+        if body:
+            form_data.add_field("body", body)
+        if html:
+            form_data.add_field("html", html)
+        if reply_to_thread:
+            form_data.add_field("reply_to_thread", reply_to_thread)
+
+        if attachments:
+            for p in attachments:
+                pth = Path(p)
+                if not pth.exists():
+                    raise FileNotFoundError(f"Attachment not found: {p}")
+                async with aiofiles.open(pth, "rb") as f:
+                    content = await f.read()
+                    form_data.add_field("attachments", content, filename=pth.name)
+
+        await self._async_rate_limit()
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.backend_url}/send_email",
+                data=form_data,
+                headers={"Authorization": f"Bearer {self.session_token}"}
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+    async def list_emails_async(self, max_results: int = 10, query: Optional[str] = None, page_token: Optional[str] = None) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        params = {"max_results": max_results}
+        if query:
+            params["query"] = query
+        if page_token:
+            params["page_token"] = page_token
+        
+        await self._async_rate_limit()
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.backend_url}/list_emails",
+                params=params,
+                headers={"Authorization": f"Bearer {self.session_token}"}
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+    async def get_email_async(self, message_id: str, format: str = "full") -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        await self._async_rate_limit()
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.backend_url}/get_email/{message_id}",
+                params={"format": format},
+                headers={"Authorization": f"Bearer {self.session_token}"}
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+    async def get_parsed_email_async(self, message_id: str) -> dict:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        await self._async_rate_limit()
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.backend_url}/get_parsed_email/{message_id}",
+                headers={"Authorization": f"Bearer {self.session_token}"}
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+    async def get_attachment_async(self, message_id: str, attachment_id: str, output_path: Optional[Union[str, Path]] = None) -> bytes:
+        if not self.session_token:
+            raise RuntimeError("Client not initialized. Call init() first.")
+        
+        await self._async_rate_limit()
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.backend_url}/get_attachment/{message_id}/{attachment_id}",
+                headers={"Authorization": f"Bearer {self.session_token}"}
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        
+        attachment_bytes = base64.urlsafe_b64decode(data["data"])
+        
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(output_path, "wb") as f:
+                await f.write(attachment_bytes)
+        
+        return attachment_bytes
+
+    async def get_all_attachments(self, message_id: str, output_dir: Union[str, Path] = "./attachments") -> List[Path]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        email_data = await self.get_parsed_email_async(message_id)
+        attachments = email_data.get("attachments", [])
+        
+        if not attachments:
+            return []
+        
+        saved_paths = []
+        for att in attachments:
+            filename = att.get("filename", "unnamed_attachment")
+            attachment_id = att.get("attachment_id")
+            
+            if not attachment_id:
+                continue
+            
+            output_path = output_dir / filename
+            counter = 1
+            while output_path.exists():
+                name_parts = filename.rsplit(".", 1)
+                if len(name_parts) == 2:
+                    output_path = output_dir / f"{name_parts[0]}_{counter}.{name_parts[1]}"
+                else:
+                    output_path = output_dir / f"{filename}_{counter}"
+                counter += 1
+            
+            await self.get_attachment_async(message_id, attachment_id, output_path)
+            saved_paths.append(output_path)
+            print(f"Downloaded: {output_path}")
+        
+        return saved_paths
+
+def main():
+    parser = argparse.ArgumentParser(prog="pygmail", description="pygmail CLI")
+    sub = parser.add_subparsers(dest="command")
+
+    auth_p = sub.add_parser("authenticate", help="Authenticate via browser-based OAuth loopback")
+    auth_p.add_argument("--no-browser", action="store_true", help="Print URL instead of opening browser")
+
+    send_p = sub.add_parser("send", help="Send an email")
+    send_p.add_argument("--to", action="append", required=True, help="Recipient (can repeat)")
+    send_p.add_argument("--cc", action="append", help="CC recipient (only one)")
+    send_p.add_argument("--bcc", action="append", help="BCC recipient (only one)")
+    send_p.add_argument("--subject", required=True, help="Subject")
+    send_p.add_argument("--body", help="Plain text body")
+    send_p.add_argument("--html", help="HTML string or path to .html file")
+    send_p.add_argument("--attach", action="append", help="Attachment file path (only one)")
+    send_p.add_argument("--reply", help="Thread ID to reply to")
+
+    sub.add_parser("me", help="Show authenticated user info")
+    init_p = sub.add_parser("init", help="Load session token from a file or paste token")
+    init_p.add_argument("--token", help="Session token string (if not provided, loads default session file)")
+
+    list_p = sub.add_parser("list", help="List emails")
+    list_p.add_argument("--max", type=int, default=10, help="Maximum number of emails to list")
+    list_p.add_argument("--query", help="Gmail search query (e.g., 'is:unread from:someone@example.com')")
+
+    get_p = sub.add_parser("get", help="Get email details")
+    get_p.add_argument("message_id", help="Message ID")
+
+    dl_p = sub.add_parser("download", help="Download attachments from an email")
+    dl_p.add_argument("message_id", help="Message ID")
+    dl_p.add_argument("--output", "-o", default="./attachments", help="Output directory (default: ./attachments)")
+    dl_p.add_argument("--attachment-id", help="Specific attachment ID to download (downloads all if not specified)")
+
+    exp_p = sub.add_parser("export", help="Export emails to CSV")
+    exp_p.add_argument("target", help="'all', 'thread:THREAD_ID', or a specific message_id")
+    exp_p.add_argument("--output", "-o", default="export.csv", help="Output filename (default: export.csv)")
+
+    args = parser.parse_args()
+    client = GmailClient()
+
+    if args.command == "authenticate":
+        client.authenticate_cli(open_browser=not args.no_browser)
+    elif args.command == "send":
+        client.init()
+        html_content = None
+        if args.html:
+            p = Path(args.html)
+            html_content = p.read_text(encoding="utf-8") if p.exists() else args.html
+        resp = client.send_email(
+            to=args.to,
+            cc=args.cc,
+            bcc=args.bcc,
+            subject=args.subject,
+            body=args.body,
+            html=html_content,
+            attachments=args.attach,
+            reply_to_thread=args.reply,
+        )
+        print("Message sent:", resp)
+    elif args.command == "me":
+        client.init()
+        print(client.me())
+    elif args.command == "init":
+        client.init(args.token)
+        print("Token loaded.")
+    elif args.command == "list":
+        client.init()
+        result = client.list_emails(max_results=args.max, query=args.query)
+        print(f"Found {result.get('result_size_estimate', 0)} emails")
+        for msg in result.get("messages", []):
+            print(f"  - {msg['id']}")
+    elif args.command == "get":
+        client.init()
+        email = client.get_parsed_email(args.message_id)
+        print(f"From: {email['headers'].get('From', 'N/A')}")
+        print(f"To: {email['headers'].get('To', 'N/A')}")
+        print(f"Subject: {email['headers'].get('Subject', 'N/A')}")
+        print(f"Date: {email['headers'].get('Date', 'N/A')}")
+        print(f"\nSnippet: {email.get('snippet', 'N/A')}")
+        if email.get('attachments'):
+            print(f"\nAttachments ({len(email['attachments'])}):")
+            for att in email['attachments']:
+                print(f"  - {att['filename']} ({att.get('size', 0)} bytes) [ID: {att['attachment_id']}]")
+    elif args.command == "download":
+        client.init()
+        if args.attachment_id:
+            # Download specific attachment
+            email = client.get_parsed_email(args.message_id)
+            att = next((a for a in email.get('attachments', []) if a['attachment_id'] == args.attachment_id), None)
+            if not att:
+                print(f"Attachment {args.attachment_id} not found")
+            else:
+                filename = att.get('filename', 'unnamed_attachment')
+                output_path = Path(args.output) / filename
+                client.get_attachment(args.message_id, args.attachment_id, output_path)
+                print(f"Downloaded: {output_path}")
+        else:
+            # Download all attachments
+            paths = client.get_all_attachments(args.message_id, args.output)
+            if paths:
+                print(f"Downloaded {len(paths)} attachment(s) to {args.output}")
+            else:
+                print("No attachments found")
+    elif args.command == "export":
+        client.init()
+        client.export_emails(target=args.target, output_file=args.output)
+    else:
+        parser.print_help()
