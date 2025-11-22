@@ -576,12 +576,12 @@ def main():
 
     send_p = sub.add_parser("send", help="Send an email")
     send_p.add_argument("--to", action="append", required=True, help="Recipient (can repeat)")
-    send_p.add_argument("--cc", action="append", help="CC recipient (only one)")
-    send_p.add_argument("--bcc", action="append", help="BCC recipient (only one)")
+    send_p.add_argument("--cc", action="append", help="CC recipient")
+    send_p.add_argument("--bcc", action="append", help="BCC recipient")
     send_p.add_argument("--subject", required=True, help="Subject")
     send_p.add_argument("--body", help="Plain text body")
     send_p.add_argument("--html", help="HTML string or path to .html file")
-    send_p.add_argument("--attach", action="append", help="Attachment file path (only one)")
+    send_p.add_argument("--attach", action="append", help="Attachment file path")
     send_p.add_argument("--reply", help="Thread ID to reply to")
 
     sub.add_parser("me", help="Show authenticated user info")

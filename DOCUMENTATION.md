@@ -102,6 +102,17 @@ pygmail send \
 --attach <path to attachment>
 ```
 
+You can also reply to emails, by passing a `thread_id` to the `reply` argument:
+```py
+resp2 = client.send_email(
+    to="recipient@example.com",
+    subject="This is a Subject",
+    body="This is a body",
+    reply="thread_id" 
+)
+```
+You do need to specify everyone who needs to get the message, even those already in the thread.
+
 ### **reading emails**
 You can read/search emails using pygmail,  
 ```py
