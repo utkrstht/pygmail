@@ -322,7 +322,7 @@ async def send_email(
     subject: str = Form(...),
     body: Optional[str] = Form(None),
     html: Optional[str] = Form(None),
-    reply_to_thread: Optional[str] = Form(None),
+    reply: Optional[str] = Form(None),
     attachments: List[UploadFile] = File(default=[])
 ):
     # --- auth ---
@@ -386,8 +386,8 @@ async def send_email(
     raw = base64.urlsafe_b64encode(root.as_bytes()).decode()
     
     send_body = {"raw": raw}
-    if reply_to_thread:
-        send_body["threadId"] = reply_to_thread
+    if reply:
+        send_body["threadId"] = reply
     
     result = service.users().messages().send(userId="me", body=send_body).execute()
     return {"message_id": result["id"], "thread_id": result.get("threadId")}

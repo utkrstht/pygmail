@@ -165,7 +165,7 @@ class GmailClient:
         return resp.json()
 
     # holy long ass function definition
-    def send_email(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None, reply_to_thread: Optional[str] = None) -> dict:
+    def send_email(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None, reply: Optional[str] = None) -> dict:
         if not self.session_token:
             raise RuntimeError("Client not initialized. Call init() first.")
 
@@ -195,8 +195,8 @@ class GmailClient:
             data.append(("body", body))
         if html:
             data.append(("html", html))
-        if reply_to_thread:
-            data.append(("reply_to_thread", reply_to_thread))
+        if reply:
+            data.append(("reply", reply))
 
         files = []
         file_objs = []
@@ -409,7 +409,7 @@ class GmailClient:
             await asyncio.sleep(self._min_interval - elapsed)
         self._last_call = time.time()
 
-    async def send_email_async(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None, reply_to_thread: Optional[str] = None) -> dict:
+    async def send_email_async(self, to: Union[str, List[str]], subject: str, body: Optional[str] = None, html: Optional[str] = None, cc: Optional[Union[str, List[str]]] = None, bcc: Optional[Union[str, List[str]]] = None, attachments: Optional[List[Union[str, Path]]] = None, reply: Optional[str] = None) -> dict:
         if not self.session_token:
             raise RuntimeError("Client not initialized. Call init() first.")
 
@@ -436,8 +436,8 @@ class GmailClient:
             form_data.add_field("body", body)
         if html:
             form_data.add_field("html", html)
-        if reply_to_thread:
-            form_data.add_field("reply_to_thread", reply_to_thread)
+        if reply:
+            form_data.add_field("reply", reply)
 
         if attachments:
             for p in attachments:
@@ -623,7 +623,7 @@ def main():
             body=args.body,
             html=html_content,
             attachments=args.attach,
-            reply_to_thread=args.reply,
+            reply=args.reply,
         )
         print("Message sent:", resp)
     elif args.command == "me":
