@@ -2,6 +2,9 @@
 Python Gmail client to send emails fast and easy  
 Installation through `pip install pygmail`  
 
+> [!WARNING]
+> The backend server is down, this will not work.
+
 > [!IMPORTANT]
 > Do note that pygmail is not currently on PyPi
 
@@ -47,3 +50,4 @@ Find examples in `examples/`
 `401 Client Error: Unauthorized for url`--- You're not authenticated, See [this](#authenticate) on how to.  
 `[WinError 10061] No connection could be made because the target machine actively refused it` --- The backend server is down, wait a few minutes or so.  
 `500 Server Error` --- Server is under maintence, and so the server ran into an error trying to process your request.
+
