@@ -1,0 +1,8 @@
+*.json
+__pycache__/
+/tokens
+*.png
+*.token
+py_gmail.egg-info/
+backend/credentials.json
+backend/tokens/.backend_secrets
